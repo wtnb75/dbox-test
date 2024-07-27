@@ -6,7 +6,6 @@ import datetime
 import webbrowser
 import unicodedata
 import fnmatch
-import re
 from typing import Optional
 from enum import Enum, auto
 import dropbox
@@ -46,7 +45,9 @@ def dropbox_option(func):
     def _(refresh_token, app_key, app_secret, *args, **kwargs):
         dbx = dropbox.Dropbox(oauth2_refresh_token=refresh_token, app_key=app_key, app_secret=app_secret)
         dbx.refresh_access_token()
-        return func(dbx=dbx, *args, **kwargs)
+        res = func(dbx=dbx, *args, **kwargs)
+        dbx.close()
+        return res
     return _
 
 
@@ -72,6 +73,7 @@ def auth(app_key, app_secret):
         _log.info("user id: %s", oauth_result.user_id)
         _log.info("expire: %s", oauth_result.expires_at)
         _log.info("scope: %s", oauth_result.scope)
+        click.echo(f"   export DROPBOX_REFRESH_TOKEN={oauth_result.refresh_token}")
     except Exception:
         _log.exception("error")
 
@@ -116,11 +118,60 @@ def ls(dbx: dropbox.Dropbox, directory, recursive):
                 str(i.server_modified-i.client_modified), path_d))
 
 
+@cli.command()
+@verbose_option
+@dropbox_option
+@click.argument("filename")
+def ls_revision(dbx: dropbox.Dropbox, filename):
+    res = dbx.files_list_revisions(filename)
+    if res.is_deleted:
+        click.echo(f"deleted: {filename}")
+    if res.server_deleted:
+        click.echo(f"server-deleted: {filename}")
+    click.echo("{:20}  {:20} {}".format("revision", "modified", "content_hash"))
+    for i in res.entries:
+        click.echo("{:20} {:20} {}".format(i.rev, i.server_modified.isoformat(), i.content_hash))
+        _log.debug("entry: %s", i)
+
+
+@cli.command()
+@verbose_option
+@dropbox_option
+@click.option("--revision")
+@click.option("--output", type=click.Path())
+@click.option("--zip/--raw", default=False, show_default=True)
+@click.argument("filename")
+def download(dbx: dropbox.Dropbox, filename, output, revision, zip):
+    if zip and revision:
+        _log.error("cannot use --zip and --revision")
+        raise click.Abort()
+    if zip:
+        dbx.files_download_zip_to_file(output, filename)
+    else:
+        dbx.files_download_to_file(output, filename, revision)
+
+
 def get_hash(p: pathlib.Path) -> str:
     hashes = []
     with p.open('rb') as ifp:
         hashes.append(hashlib.sha256(ifp.read(4*1024*1024)).digest())
     return hashlib.sha256(b"".join(hashes)).hexdigest()
+
+
+@cli.command()
+@verbose_option
+@click.argument("filename", type=click.Path(exists=True, file_okay=True, dir_okay=False), nargs=-1)
+def hash(filename):
+    for i in filename:
+        click.echo(f"{get_hash(pathlib.Path(i))} {i}")
+
+
+@cli.command()
+@verbose_option
+@dropbox_option
+def user(dbx: dropbox.Dropbox):
+    res = dbx.users_get_current_account()
+    click.echo(res)
 
 
 class Mode(Enum):
@@ -178,6 +229,7 @@ def detect_mode(dbx: dropbox.Dropbox, local_path: pathlib.Path, remote_file: str
 
 def sync1(dbx: dropbox.Dropbox, mode: Mode, local_file: str, remote_file: str, dry: bool):
     local_path = pathlib.Path(local_file)
+    local_path.parent.mkdir(exist_ok=True, parents=True)
     if mode == Mode.download:
         _log.info("download: %s -> %s", remote_file, local_file)
         if not dry:
@@ -209,8 +261,6 @@ def is_ignore(fname: str, ignore: list[str]) -> bool:
     for i in ignore:
         if fnmatch.fnmatch(fname, i):
             return True
-        # if re.match(i, fname):
-        #     return True
     return False
 
 
@@ -257,6 +307,38 @@ def sync_dir(dbx: dropbox.Dropbox, local_dir, remote_dir, ignore, dry):
         mode = detect_mode(dbx, local_file, remote_file)
         sync1(dbx, mode, local_file, remote_file, dry)
         done.add(normalized)
+
+
+@cli.command()
+@verbose_option
+@dropbox_option
+@click.option("--local-dir", type=click.Path())
+@click.option("--remote-dir", type=click.Path())
+@click.option("--dry/--wet", default=False, show_default=True)
+@click.argument("fnames", nargs=-1)
+def rm_both(dbx: dropbox.Dropbox, local_dir, remote_dir, dry, fnames):
+    rdir, relative = fix_remote_path(remote_dir)
+    local_path = pathlib.Path(local_dir)
+    list_res = list_all(dbx, rdir, recursive=True)
+    remote_files = [x for x in list_res if isinstance(x, dropbox.files.FileMetadata)]
+    remote_names = {pathlib.Path(x.path_display).relative_to(relative).as_posix() for x in remote_files}
+    remote_to_del = remote_names & set(fnames)
+    local_names: set[str] = set()
+    for root, _, files in local_path.walk():
+        for f in files:
+            local_names.add((root / f).relative_to(local_path).as_posix())
+    local_to_del = local_names & set(fnames)
+
+    _log.info("remote: %s", remote_to_del)
+    _log.info("local: %s", local_to_del)
+    for i in remote_to_del:
+        _log.info("delete(remote): %s", i)
+        if not dry:
+            dbx.files_delete((pathlib.Path(relative) / i).as_posix())
+    for i in local_to_del:
+        _log.info("delete(local): %s", i)
+        if not dry:
+            (local_path / i).unlink()
 
 
 if __name__ == "__main__":
