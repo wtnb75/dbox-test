@@ -1,0 +1,13 @@
+*.gz
+*.db
+.coverage
+dist
+build
+.venv
+.envrc
+.env
+cover
+*.swp
+*~
+*.egg-info
+__pycache__
