@@ -1,3 +1,4 @@
+import os
 import functools
 import pathlib
 import click
@@ -146,9 +147,13 @@ def download(dbx: dropbox.Dropbox, filename, output, revision, zip):
         _log.error("cannot use --zip and --revision")
         raise click.Abort()
     if zip:
-        dbx.files_download_zip_to_file(output, filename)
+        res: dropbox.files.DownloadZipResult = dbx.files_download_zip_to_file(output, filename)
+        _log.debug("result: %s", res)
     else:
-        dbx.files_download_to_file(output, filename, revision)
+        res: dropbox.files.FileMetadata = dbx.files_download_to_file(output, filename, revision)
+        _log.debug("result: %s", res)
+        ts = res.server_modified.timestamp()
+        os.utime(output, (ts, ts))
 
 
 def get_hash(p: pathlib.Path) -> str:
@@ -233,11 +238,17 @@ def sync1(dbx: dropbox.Dropbox, mode: Mode, local_file: str, remote_file: str, d
     if mode == Mode.download:
         _log.info("download: %s -> %s", remote_file, local_file)
         if not dry:
-            dbx.files_download_to_file(local_file, remote_file)
+            res: dropbox.files.FileMetadata = dbx.files_download_to_file(local_file, remote_file)
+            if res:
+                ts = res.server_modified.timestamp()
+                os.utime(local_path, (ts, ts))
     elif mode == Mode.upload:
         _log.info("upload: %s <- %s", remote_file, local_file)
         if not dry:
-            dbx.files_upload(local_path.read_bytes(), remote_file, dropbox.files.WriteMode.overwrite)
+            st = local_path.stat()
+            ts = datetime.datetime.fromtimestamp(st.st_mtime)
+            dbx.files_upload(local_path.read_bytes(), remote_file, dropbox.files.WriteMode.overwrite,
+                             client_modified=ts)
     elif mode == Mode.unchanged:
         _log.info("unchanged: %s = %s", remote_file, local_file)
     elif mode == Mode.unknown:
