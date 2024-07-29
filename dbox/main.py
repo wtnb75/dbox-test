@@ -6,6 +6,7 @@ import hashlib
 import datetime
 import webbrowser
 import unicodedata
+import keyring
 import fnmatch
 from typing import Optional
 from enum import Enum, auto
@@ -39,11 +40,19 @@ def verbose_option(func):
 
 
 def dropbox_option(func):
+    @click.option("--keyring", "keyring_system", envvar="DROPBOX_KEYRING", show_envvar=True)
     @click.option("--refresh-token", envvar="DROPBOX_REFRESH_TOKEN", show_envvar=True)
     @click.option("--app-key", envvar="DROPBOX_APP_KEY", show_envvar=True)
     @click.option("--app-secret", envvar="DROPBOX_APP_SECRET", show_envvar=True)
     @functools.wraps(func)
-    def _(refresh_token, app_key, app_secret, *args, **kwargs):
+    def _(refresh_token, app_key, app_secret, keyring_system, *args, **kwargs):
+        if keyring_system:
+            if not refresh_token:
+                refresh_token = keyring.get_password(keyring_system, "refresh_token")
+            if not app_key:
+                app_key = keyring.get_password(keyring_system, "app_key")
+            if not app_secret:
+                app_secret = keyring.get_password(keyring_system, "app_secret")
         dbx = dropbox.Dropbox(oauth2_refresh_token=refresh_token, app_key=app_key, app_secret=app_secret)
         dbx.refresh_access_token()
         res = func(dbx=dbx, *args, **kwargs)
@@ -54,9 +63,19 @@ def dropbox_option(func):
 
 @cli.command()
 @verbose_option
+@click.option("--keyring", "keyring_system", envvar="DROPBOX_KEYRING", show_envvar=True)
 @click.option("--app-key", envvar="DROPBOX_APP_KEY", show_envvar=True)
 @click.option("--app-secret", envvar="DROPBOX_APP_SECRET", show_envvar=True)
-def auth(app_key, app_secret):
+def auth(keyring_system, app_key, app_secret):
+    if keyring_system:
+        if app_key:
+            keyring.set_password(keyring_system, "app_key", app_key)
+        else:
+            app_key = keyring.get_password(keyring_system, "app_key")
+        if app_secret:
+            keyring.set_password(keyring_system, "app_secret", app_secret)
+        else:
+            app_secret = keyring.get_password(keyring_system, "app_secret")
     auth_flow = dropbox.DropboxOAuth2FlowNoRedirect(
         consumer_key=app_key, consumer_secret=app_secret,
         token_access_type='offline',
@@ -74,7 +93,11 @@ def auth(app_key, app_secret):
         _log.info("user id: %s", oauth_result.user_id)
         _log.info("expire: %s", oauth_result.expires_at)
         _log.info("scope: %s", oauth_result.scope)
-        click.echo(f"   export DROPBOX_REFRESH_TOKEN={oauth_result.refresh_token}")
+        if keyring_system:
+            keyring.set_password(keyring_system, "refresh_token", oauth_result.refresh_token)
+            click.echo(f"   export DROPBOX_KEYRING={keyring_system}")
+        else:
+            click.echo(f"   export DROPBOX_REFRESH_TOKEN={oauth_result.refresh_token}")
     except Exception:
         _log.exception("error")
 
