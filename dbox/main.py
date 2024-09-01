@@ -220,6 +220,7 @@ def detect_mode(dbx: dropbox.Dropbox, local_path: pathlib.Path, remote_file: str
             if e.error.get_path().is_not_found():
                 _log.debug("remote not found: upload")
                 if not local_path.exists():
+                    _log.debug("local not found: %s", local_path)
                     return Mode.unknown
                 return Mode.upload
             raise
@@ -338,8 +339,8 @@ def sync_dir(dbx: dropbox.Dropbox, local_dir, remote_dir, ignore, dry):
         if normalized in done:
             continue
         remote_file = (pathlib.Path(rdir) / normalized).as_posix()
-        mode = detect_mode(dbx, local_file, remote_file)
-        sync1(dbx, mode, local_file, remote_file, dry)
+        mode = detect_mode(dbx, local_path / local_file, remote_file)
+        sync1(dbx, mode, local_path / local_file, remote_file, dry)
         done.add(normalized)
 
 
